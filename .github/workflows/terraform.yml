@@ -203,7 +203,7 @@ jobs:
           # Try to connect to EKS — if cluster is already gone, skip
           if aws eks update-kubeconfig \
               --region ${{ secrets.AWS_REGION }} \
-              --name school-erp-production-eks 2>/dev/null; then
+              --name school-erp-cluster 2>/dev/null; then
 
             echo "✅ Connected to EKS — cleaning up..."
 
