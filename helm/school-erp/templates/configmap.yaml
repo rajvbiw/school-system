@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "school-erp.fullname" . }}-config
+  labels:
+    {{- include "school-erp.labels" . | nindent 4 }}
+data:
+  NODE_ENV: "production"
+  DB_HOST: {{ .Values.mysql.host | quote }}
+  DB_PORT: {{ .Values.mysql.port | quote }}
+  MYSQL_DATABASE: {{ .Values.mysql.database | quote }}
+  REDIS_HOST: {{ .Values.redis.host | quote }}
+  REDIS_PORT: {{ .Values.redis.port | quote }}
+  AWS_REGION: {{ .Values.s3.region | quote }}
+  S3_BUCKET: {{ .Values.s3.bucket | quote }}
+  FRONTEND_URL: "https://{{ .Values.ingress.host }}"
+  SOCKET_CORS_ORIGIN: "https://{{ .Values.ingress.host }}"
+  TENANT_SLUG: {{ .Values.tenant.slug | quote }}
+  TENANT_NAME: {{ .Values.tenant.name | quote }}

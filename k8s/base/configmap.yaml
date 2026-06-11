@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+data:
+  NODE_ENV: "production"
+  DB_HOST: "RDS_ENDPOINT_PLACEHOLDER"
+  DB_PORT: "3306"
+  MYSQL_DATABASE: "school_erp_main"
+  REDIS_HOST: "ELASTICACHE_ENDPOINT_PLACEHOLDER"
+  REDIS_PORT: "6379"
+  AWS_REGION: "us-east-1"
+  S3_BUCKET: "school-erp-uploads"
+  FRONTEND_URL: "https://TENANT_SLUG.edtech.example.com"
+  SOCKET_CORS_ORIGIN: "https://TENANT_SLUG.edtech.example.com"

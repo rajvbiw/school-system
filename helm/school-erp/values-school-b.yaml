@@ -1,0 +1,10 @@
+tenant:
+  slug: "school-b"
+  name: "Greenwood Institute"
+  primaryColor: "#10B981"
+
+ingress:
+  host: "school-b.edtech.example.com"
+
+mysql:
+  database: "school_b_db"

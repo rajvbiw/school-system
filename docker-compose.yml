@@ -1,0 +1,104 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: school_erp_mysql
+    restart: unless-stopped
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: school_erp_main
+      MYSQL_USER: school_erp_user
+      MYSQL_PASSWORD: school_erp_password
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - backend_net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot_password"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: school_erp_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - backend_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: school_erp_backend
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      - NODE_ENV=development
+      - PORT=5000
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_USER=school_erp_user
+      - DB_PASSWORD=school_erp_password
+      - DB_NAME=school_erp_main
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - JWT_SECRET=super_secret_jwt_access_key_32_characters_minimum
+      - JWT_REFRESH_SECRET=super_secret_jwt_refresh_key_32_characters_minimum
+      - FRONTEND_URL=http://localhost:3000
+      - SOCKET_CORS_ORIGIN=http://localhost:3000
+    networks:
+      - frontend_net
+      - backend_net
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: school_erp_frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    networks:
+      - frontend_net
+    depends_on:
+      - backend
+
+  adminer:
+    image: adminer
+    container_name: school_erp_adminer
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    networks:
+      - backend_net
+    depends_on:
+      - mysql
+
+volumes:
+  mysql_data:
+  redis_data:
+
+networks:
+  frontend_net:
+    driver: bridge
+  backend_net:
+    driver: bridge

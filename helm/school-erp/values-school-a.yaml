@@ -1,0 +1,10 @@
+tenant:
+  slug: "school-a"
+  name: "Springfield Academy"
+  primaryColor: "#3B82F6"
+
+ingress:
+  host: "school-a.edtech.example.com"
+
+mysql:
+  database: "school_a_db"

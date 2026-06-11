@@ -1,0 +1,67 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --primary-color: #3B82F6;
+  --primary-hover: #2563EB;
+  --primary-light: #EFF6FF;
+  
+  --card-bg: #ffffff;
+  --card-fg: #1E293B;
+  
+  --background-color: #F8FAFC;
+  --foreground-color: #0F172A;
+}
+
+.dark {
+  --card-bg: #1E293B;
+  --card-fg: #F8FAFC;
+  --background-color: #0F172A;
+  --foreground-color: #F8FAFC;
+}
+
+body {
+  background-color: var(--background-color);
+  color: var(--foreground-color);
+  margin: 0;
+  min-height: 100vh;
+}
+
+/* Scrollbar customization */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* React Big Calendar customizations to match premium UI */
+.rbc-calendar {
+  font-family: 'Outfit', sans-serif;
+  background: var(--card-bg);
+  border-radius: 0.75rem;
+  padding: 1rem;
+  border: 1px solid #e2e8f0;
+}
+.rbc-header {
+  font-weight: 600;
+  padding: 0.5rem 0 !important;
+  color: #64748b;
+}
+.rbc-event {
+  background-color: var(--primary-color) !important;
+  border-radius: 4px !important;
+  border: none !important;
+}
+.rbc-today {
+  background-color: var(--primary-light) !important;
+}
