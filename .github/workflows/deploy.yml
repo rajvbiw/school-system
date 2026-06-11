@@ -1,77 +1,431 @@
-name: Deploy – Kubernetes Application
+name: Deploy — EKS Kubernetes Deployment (AWS)
 
 on:
   workflow_run:
-    workflows: ["Terraform – Infrastructure Provisioning"]
+    workflows: ["School ERP CI/CD Pipeline"]
     types:
       - completed
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Docker image tag to deploy (default: latest)"
+        required: false
+        default: "latest"
 
 env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
+  EKS_CLUSTER_NAME: "school-erp-production-eks"
+  BACKEND_IMAGE: "${{ secrets.DOCKERHUB_USERNAME }}/school-erp-backend"
+  FRONTEND_IMAGE: "${{ secrets.DOCKERHUB_USERNAME }}/school-erp-frontend"
 
 jobs:
-  deploy:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+  # ==========================================
+  # GUARD: Verify CI Success
+  # ==========================================
+  check-ci-status:
+    name: ✅ Check CI Status
     runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
     steps:
-      - name: Checkout repository
+      - name: CI passed — proceeding to deploy
+        run: |
+          echo "✅ CI pipeline passed. Starting EKS deployment..."
+          echo "Triggered by: ${{ github.event_name }}"
+
+  # ==========================================
+  # JOB 1: Pre-Deploy (Resolve Tag)
+  # ==========================================
+  pre-deploy:
+    name: "🏷️ Resolve Image Tag"
+    runs-on: ubuntu-latest
+    needs: check-ci-status
+    outputs:
+      image_tag: ${{ steps.resolve_tag.outputs.tag }}
+    steps:
+      - name: Resolve image tag
+        id: resolve_tag
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.image_tag }}"
+          else
+            TAG="${{ github.event.workflow_run.head_sha }}"
+            TAG="${TAG:0:8}"
+          fi
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "🏷️ Deploying image tag: ${TAG}"
+
+  # ==========================================
+  # JOB 2: Deploy to EKS
+  # ==========================================
+  deploy-to-eks:
+    name: "🚀 Deploy to EKS"
+    runs-on: ubuntu-latest
+    needs: pre-deploy
+
+    steps:
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Retrieve EKS kubeconfig
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: "v1.28.0"
+
+      - name: Update kubeconfig for EKS
         run: |
-          aws eks update-kubeconfig --name $(terraform -chdir=./infra/terraform output -raw eks_cluster_name) --region ${{ env.AWS_REGION }}
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.EKS_CLUSTER_NAME }}
+          echo "✅ kubeconfig updated for EKS cluster: ${{ env.EKS_CLUSTER_NAME }}"
 
-      - name: Login to Amazon ECR
-        id: ecr-login
-        uses: aws-actions/amazon-ecr-login@v2
+      - name: Verify cluster connection
+        run: |
+          kubectl cluster-info
+          kubectl get nodes
 
-      # -------------------------- Backend image --------------------------
-      - name: Build & push Backend image
+      - name: ✅ Uncordon all nodes (ensure schedulable)
+        run: |
+          echo "Ensuring all nodes are schedulable..."
+          for NODE in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
+            kubectl uncordon "$NODE" || true
+          done
+          kubectl get nodes
+          echo "✅ All nodes confirmed schedulable"
+
+      - name: Configure VPC CNI (Prefix Delegation — more IPs per node)
+        run: |
+          echo "Enabling Prefix Delegation on VPC CNI for t3.small (11 → 110 IPs per node)..."
+          kubectl set env daemonset/aws-node -n kube-system \
+            ENABLE_PREFIX_DELEGATION=true \
+            WARM_PREFIX_TARGET=1 \
+            WARM_IP_TARGET=2 \
+            MINIMUM_IP_TARGET=4
+          kubectl rollout status daemonset/aws-node -n kube-system --timeout=90s || true
+          echo "✅ VPC CNI Prefix Delegation enabled"
+
+      - name: Install Metrics Server (required for HPA CPU scaling)
+        run: |
+          if ! kubectl get deployment metrics-server -n kube-system > /dev/null 2>&1; then
+            echo "Installing metrics-server..."
+            kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+            kubectl patch deployment metrics-server -n kube-system \
+              --type=json \
+              -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+            echo "✅ Metrics-server installed"
+          else
+            echo "✅ Metrics-server already running"
+          fi
+
+      - name: Install KEDA (Kubernetes Event-driven Autoscaling)
+        run: |
+          if ! kubectl get crd scaledobjects.keda.sh > /dev/null 2>&1; then
+            echo "Installing KEDA..."
+            helm repo add kedacore https://kedacore.github.io/charts
+            helm repo update
+            helm install keda kedacore/keda --namespace keda --create-namespace --wait
+            echo "✅ KEDA installed successfully"
+          else
+            echo "✅ KEDA already installed"
+          fi
+
+      - name: Inject AWS Endpoints into ConfigMap
+        run: |
+          RDS_HOST=$(aws s3 cp s3://${{ secrets.TF_STATE_BUCKET }}/school-erp/terraform.tfstate - \
+            | python3 -c "import sys,json; s=json.load(sys.stdin); print(s['outputs']['rds_endpoint']['value'].split(':')[0])" 2>/dev/null || echo '')
+
+          REDIS_HOST=$(aws s3 cp s3://${{ secrets.TF_STATE_BUCKET }}/school-erp/terraform.tfstate - \
+            | python3 -c "import sys,json; s=json.load(sys.stdin); print(s['outputs']['elasticache_endpoint']['value'])" 2>/dev/null || echo '')
+
+          if [ -n "$RDS_HOST" ]; then
+            sed -i "s|RDS_ENDPOINT_PLACEHOLDER|${RDS_HOST}|g" k8s/base/configmap.yaml
+            echo "✅ RDS endpoint injected: ${RDS_HOST}"
+          else
+            echo "⚠️  RDS endpoint not found — keeping placeholder"
+          fi
+
+          if [ -n "$REDIS_HOST" ]; then
+            sed -i "s|ELASTICACHE_ENDPOINT_PLACEHOLDER|${REDIS_HOST}|g" k8s/base/configmap.yaml
+            echo "✅ ElastiCache endpoint injected: ${REDIS_HOST}"
+          else
+            echo "⚠️  ElastiCache endpoint not found — keeping placeholder"
+          fi
+
+      - name: 🧹 Clean up legacy resources
+        run: |
+          # Remove old HPA conflicts
+          kubectl delete hpa backend-hpa -n school-a --ignore-not-found
+          kubectl delete hpa backend-hpa -n school-b --ignore-not-found
+          # Delete legacy ingress resources (migrating to LoadBalancer services)
+          kubectl delete ingress school-erp-ingress -n school-a --ignore-not-found || true
+          kubectl delete ingress school-erp-ingress -n school-b --ignore-not-found || true
+          # Remove in-cluster MySQL (prod uses RDS)
+          for ns in school-a school-b; do
+            kubectl delete statefulset mysql -n "$ns" --ignore-not-found || true
+            kubectl delete service mysql -n "$ns" --ignore-not-found || true
+          done
+          echo "✅ Legacy resources cleaned up"
+
+      - name: 🧹 Scale down to 0 first (release IPs before new deploy)
+        run: |
+          echo "Scaling down all deployments to release ENI IP addresses..."
+          for ns in school-a school-b; do
+            kubectl scale deployment school-erp-backend  --replicas=0 -n "$ns" --ignore-not-found || true
+            kubectl scale deployment school-erp-frontend --replicas=0 -n "$ns" --ignore-not-found || true
+          done
+          echo "⏳ Waiting 30s for pods to terminate and IPs to be freed..."
+          sleep 30
+          echo "✅ IPs freed — proceeding to deploy"
+
+      - name: Deploy Tenant School A
         env:
-          REPO: ${{ steps.ecr-login.outputs.registry }}/${{ vars.ECR_REPO_BACKEND || "school-erp-backend" }}
-          TAG: ${{ github.sha }}
+          TAG: ${{ needs.pre-deploy.outputs.image_tag }}
         run: |
-          docker build -f backend/Dockerfile -t $REPO:$TAG .
-          docker push $REPO:$TAG
+          cd k8s/tenants/school-a
+          sed -i "s|BACKEND_NEWIMAGE_PLACEHOLDER|${{ env.BACKEND_IMAGE }}|g" kustomization.yaml
+          sed -i "s|FRONTEND_NEWIMAGE_PLACEHOLDER|${{ env.FRONTEND_IMAGE }}|g" kustomization.yaml
+          sed -i "s|BACKEND_NEWTAG_PLACEHOLDER|${TAG}|g" kustomization.yaml
+          sed -i "s|FRONTEND_NEWTAG_PLACEHOLDER|${TAG}|g" kustomization.yaml
+          echo "--- School A Kustomization ---"
+          cat kustomization.yaml
+          kubectl apply -k .
 
-      # -------------------------- Frontend image --------------------------
-      - name: Build & push Frontend image
+      - name: Deploy Tenant School B
         env:
-          REPO: ${{ steps.ecr-login.outputs.registry }}/${{ vars.ECR_REPO_FRONTEND || "school-erp-frontend" }}
-          TAG: ${{ github.sha }}
+          TAG: ${{ needs.pre-deploy.outputs.image_tag }}
         run: |
-          docker build -f frontend/Dockerfile -t $REPO:$TAG .
-          docker push $REPO:$TAG
+          cd k8s/tenants/school-b
+          sed -i "s|BACKEND_NEWIMAGE_PLACEHOLDER|${{ env.BACKEND_IMAGE }}|g" kustomization.yaml
+          sed -i "s|FRONTEND_NEWIMAGE_PLACEHOLDER|${{ env.FRONTEND_IMAGE }}|g" kustomization.yaml
+          sed -i "s|BACKEND_NEWTAG_PLACEHOLDER|${TAG}|g" kustomization.yaml
+          sed -i "s|FRONTEND_NEWTAG_PLACEHOLDER|${TAG}|g" kustomization.yaml
+          echo "--- School B Kustomization ---"
+          cat kustomization.yaml
+          kubectl apply -k .
 
-      # -------------------------- Update Helm values --------------------------
-      - name: Update Helm values with new image tags
+      - name: 🧹 Remove Monitoring Stack (Save IPs on small cluster)
         run: |
-          yq eval ".backend.image.repository = \"${{ steps.ecr-login.outputs.registry }}/${{ vars.ECR_REPO_BACKEND || \"school-erp-backend\" }}\" | \
-                  .backend.image.tag = \"${{ github.sha }}\" | \
-                  .frontend.image.repository = \"${{ steps.ecr-login.outputs.registry }}/${{ vars.ECR_REPO_FRONTEND || \"school-erp-frontend\" }}\" | \
-                  .frontend.image.tag = \"${{ github.sha }}\" | \
-                  .ingress.host = \"${{ secrets.INGRESS_HOST }}\"" -i helm/school-erp/values.yaml
+          kubectl delete -f k8s/monitoring/prometheus.yaml --ignore-not-found || true
+          kubectl delete -f k8s/monitoring/grafana.yaml --ignore-not-found || true
+          kubectl delete -f k8s/monitoring/prometheus-config.yaml --ignore-not-found || true
+          echo "✅ Monitoring stack removed (saves 3 Pod IPs)"
 
-      # -------------------------- Deploy Helm chart --------------------------
-      - name: Deploy/Upgrade Helm chart
+      - name: 🧹 Remove stale PVC finalizers (non-blocking)
         run: |
-          helm upgrade --install school-erp ./helm/school-erp \
-            --namespace erp \
-            --create-namespace \
-            -f ./helm/school-erp/values.yaml
+          for ns in school-a school-b; do
+            if kubectl get pvc school-erp-uploads-pvc -n "$ns" &>/dev/null; then
+              kubectl patch pvc school-erp-uploads-pvc -n "$ns" \
+                -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
+              kubectl delete pvc school-erp-uploads-pvc -n "$ns" --ignore-not-found --wait=false
+            fi
+          done
+          echo "✅ PVC cleanup done"
 
-      # -------------------------- Optional Monitoring --------------------------
-      - name: Deploy Prometheus & Grafana (optional)
-        if: ${{ secrets.DEPLOY_MONITORING == 'true' }}
+      - name: ⏳ Verify Rollout Status
         run: |
-          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-          helm repo update
-          helm upgrade --install prometheus-stack prometheus-community/kube-prometheus-stack \
-            --namespace monitoring \
-            --create-namespace
+          debug_namespace() {
+            local ns=$1
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "🔍 DEBUG: Pod status in namespace [$ns]"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            kubectl get pods -n "$ns" -o wide || true
+            echo ""
+            echo "📋 Recent events in [$ns]:"
+            kubectl get events -n "$ns" --sort-by='.lastTimestamp' | tail -30 || true
+            echo ""
+            echo "📝 Backend pod logs (last 50 lines):"
+            kubectl logs -n "$ns" -l app=school-erp-backend --tail=50 --ignore-errors || true
+            echo ""
+            echo "📝 Backend pod description:"
+            kubectl describe pods -n "$ns" -l app=school-erp-backend | tail -60 || true
+          }
+
+          echo "⏳ Checking rollout status in school-a..."
+          if ! kubectl rollout status deployment/school-erp-backend -n school-a --timeout=300s; then
+            debug_namespace school-a
+            exit 1
+          fi
+          if ! kubectl rollout status deployment/school-erp-frontend -n school-a --timeout=300s; then
+            debug_namespace school-a
+            exit 1
+          fi
+
+          echo "⏳ Checking rollout status in school-b..."
+          if ! kubectl rollout status deployment/school-erp-backend -n school-b --timeout=300s; then
+            debug_namespace school-b
+            exit 1
+          fi
+          if ! kubectl rollout status deployment/school-erp-frontend -n school-b --timeout=300s; then
+            debug_namespace school-b
+            exit 1
+          fi
+
+          echo "✅ All deployments rolled out successfully!"
+
+      - name: 🌱 Seed Databases
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🌱 Seeding Database for School A..."
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          if ! kubectl exec -n school-a deployment/school-erp-backend -- node dist/database/seed.js; then
+            echo "❌ Failed to seed database for school-a!"
+            echo "📋 Backend pod logs for school-a:"
+            kubectl logs -n school-a deployment/school-erp-backend --tail=100 || true
+            exit 1
+          fi
+          echo "✅ School A Database seeded successfully"
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🌱 Seeding Database for School B..."
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          if ! kubectl exec -n school-b deployment/school-erp-backend -- node dist/database/seed.js; then
+            echo "❌ Failed to seed database for school-b!"
+            echo "📋 Backend pod logs for school-b:"
+            kubectl logs -n school-b deployment/school-erp-backend --tail=100 || true
+            exit 1
+          fi
+          echo "✅ School B Database seeded successfully"
+
+      - name: 📊 Generate Deployment Summary
+        run: |
+          echo "Waiting for School A LoadBalancer URL..."
+          SCHOOL_A_LB=""
+          for i in {1..12}; do
+            SCHOOL_A_LB=$(kubectl get svc frontend -n school-a -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo '')
+            if [ -n "$SCHOOL_A_LB" ]; then break; fi
+            echo "Waiting 10s..."
+            sleep 10
+          done
+
+          echo "Waiting for School B LoadBalancer URL..."
+          SCHOOL_B_LB=""
+          for i in {1..12}; do
+            SCHOOL_B_LB=$(kubectl get svc frontend -n school-b -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo '')
+            if [ -n "$SCHOOL_B_LB" ]; then break; fi
+            echo "Waiting 10s..."
+            sleep 10
+          done
+
+          [ -z "$SCHOOL_A_LB" ] && SCHOOL_A_LB="⚠️ Provisioning... Run: kubectl get svc frontend -n school-a"
+          [ -z "$SCHOOL_B_LB" ] && SCHOOL_B_LB="⚠️ Provisioning... Run: kubectl get svc frontend -n school-b"
+
+          echo "### 🚀 School ERP — Deployment Complete!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "🌐 **School A Access URL:** [http://${SCHOOL_A_LB}/](http://${SCHOOL_A_LB}/)" >> $GITHUB_STEP_SUMMARY
+          echo "🌐 **School B Access URL:** [http://${SCHOOL_B_LB}/](http://${SCHOOL_B_LB}/)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Tenant | Service Type | Direct Clickable URL |" >> $GITHUB_STEP_SUMMARY
+          echo "| --- | --- | --- |" >> $GITHUB_STEP_SUMMARY
+          echo "| **School A** | LoadBalancer | [http://${SCHOOL_A_LB}/](http://${SCHOOL_A_LB}/) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **School B** | LoadBalancer | [http://${SCHOOL_B_LB}/](http://${SCHOOL_B_LB}/) |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### Pod Status" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          kubectl get pods -n school-a >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          kubectl get pods -n school-b >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+  # ==========================================
+  # JOB 3: Smoke Test
+  # ==========================================
+  smoke-test:
+    name: "🧪 Smoke Test"
+    runs-on: ubuntu-latest
+    needs: deploy-to-eks
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: "v1.28.0"
+
+      - name: Update kubeconfig for EKS
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Verify all pods running
+        run: |
+          echo "=== school-a pods ==="
+          kubectl get pods -n school-a
+          echo ""
+          echo "=== school-b pods ==="
+          kubectl get pods -n school-b
+
+          for ns in school-a school-b; do
+            CRASH_PODS=$(kubectl get pods -n "$ns" \
+              --field-selector=status.phase!=Running \
+              --no-headers 2>/dev/null | grep -v "Completed" | wc -l)
+            if [ "$CRASH_PODS" -gt "0" ]; then
+              echo "❌ Some pods in $ns are not healthy!"
+              exit 1
+            fi
+            echo "✅ All pods in $ns are running."
+          done
+
+  # ==========================================
+  # JOB 4: Notify Deploy
+  # ==========================================
+  notify-deploy:
+    name: "📣 Notify Deploy Status"
+    runs-on: ubuntu-latest
+    needs: [deploy-to-eks, smoke-test]
+    if: always()
+
+    steps:
+      - name: Determine status
+        id: status
+        run: |
+          if [[ "${{ needs.deploy-to-eks.result }}" == "success" && \
+                "${{ needs.smoke-test.result }}" == "success" ]]; then
+            echo "color=#36A64F" >> $GITHUB_OUTPUT
+            echo "status=✅ DEPLOYED SUCCESSFULLY" >> $GITHUB_OUTPUT
+            echo "emoji=🚀" >> $GITHUB_OUTPUT
+          else
+            echo "color=#FF0000" >> $GITHUB_OUTPUT
+            echo "status=❌ DEPLOY FAILED" >> $GITHUB_OUTPUT
+            echo "emoji=🔥" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send Slack notification
+        if: ${{ env.SLACK_WEBHOOK_URL != '' }}
+        uses: slackapi/slack-github-action@v2.0.0
+        continue-on-error: true
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "attachments": [{
+                "color": "${{ steps.status.outputs.color }}",
+                "title": "${{ steps.status.outputs.emoji }} School ERP Deploy — ${{ steps.status.outputs.status }}",
+                "fields": [
+                  { "title": "Cluster", "value": "${{ env.EKS_CLUSTER_NAME }}", "short": true },
+                  { "title": "Image Tag", "value": "${{ needs.pre-deploy.outputs.image_tag }}", "short": true },
+                  { "title": "Deploy", "value": "${{ needs.deploy-to-eks.result }}", "short": true },
+                  { "title": "Smoke Test", "value": "${{ needs.smoke-test.result }}", "short": true },
+                  { "title": "Actor", "value": "${{ github.actor }}", "short": true }
+                ],
+                "footer": "GitHub Actions — EKS Deploy (AWS)"
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}

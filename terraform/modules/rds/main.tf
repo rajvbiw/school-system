@@ -41,10 +41,4 @@ resource "aws_db_instance" "main" {
   skip_final_snapshot         = true
 }
 
-# RDS Variables & Outputs
-variable "vpc_id" { type = string }
-variable "private_subnet_ids" { type = list(string) }
-variable "eks_security_group" { type = string }
-variable "instance_class" { type = string }
 
-output "db_endpoint" { value = aws_db_instance.main.endpoint }

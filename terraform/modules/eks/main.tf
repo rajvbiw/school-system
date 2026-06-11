@@ -103,15 +103,4 @@ resource "aws_eks_addon" "kube_proxy" {
   addon_name   = "kube-proxy"
 }
 
-# EKS Variables & Outputs
-variable "vpc_id" { type = string }
-variable "private_subnet_ids" { type = list(string) }
-variable "node_instance_type" { type = string }
-variable "desired_nodes" { type = number }
-variable "min_nodes" { type = number }
-variable "max_nodes" { type = number }
 
-output "cluster_name" { value = aws_eks_cluster.main.name }
-output "cluster_endpoint" { value = aws_eks_cluster.main.endpoint }
-output "cluster_security_group_id" { value = aws_security_group.eks.id }
-output "oidc_provider" { value = aws_iam_openid_connect_provider.eks.arn }

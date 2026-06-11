@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: school-b-app
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/your-org/school-erp
+    targetRevision: main
+    path: helm/school-erp
+    helm:
+      valueFiles:
+        - values-school-b.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: school-b
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

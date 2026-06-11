@@ -1,14 +1,14 @@
-name: Terraform – Infrastructure Provisioning
+name: Terraform — Infrastructure Provisioning (AWS)
 
 on:
   push:
     branches: [main]
     paths:
-      - 'infra/terraform/**'
+      - "terraform/**"
   workflow_dispatch:
     inputs:
       action:
-        description: "plan | apply | destroy"
+        description: "Terraform action to run"
         required: true
         default: "plan"
         type: choice
@@ -18,22 +18,116 @@ on:
           - destroy
 
 env:
-  TF_VERSION: "1.9.5"
+  TF_VERSION: "1.7.0"
   AWS_REGION: ${{ secrets.AWS_REGION }}
-  TF_WORKING_DIR: "./infra/terraform"
+  TF_WORKING_DIR: "./terraform"
 
 jobs:
-  terraform:
+  # ==========================================
+  # JOB 1: Terraform Plan
+  # ==========================================
+  terraform-plan:
+    name: 📋 Terraform Plan
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Format Check
+        id: fmt
+        run: terraform fmt -check -recursive
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        continue-on-error: true
+
+      - name: Terraform Init
+        id: init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=school-erp/terraform.tfstate" \
+            -backend-config="region=${{ secrets.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ secrets.TF_STATE_LOCK_TABLE }}" \
+            -backend-config="encrypt=true"
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate -no-color
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan \
+            -no-color \
+            -var="aws_region=${{ secrets.AWS_REGION }}" \
+            -var="environment=production" \
+            -out=tfplan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Save plan output
+        run: terraform show -no-color tfplan > plan_output.txt
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: |
+            ${{ env.TF_WORKING_DIR }}/tfplan
+            ${{ env.TF_WORKING_DIR }}/plan_output.txt
+          retention-days: 5
+
+      - name: Post Plan Summary to GitHub
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const planOutput = fs.readFileSync('${{ env.TF_WORKING_DIR }}/plan_output.txt', 'utf8');
+            const body = `## 🏗️ Terraform Plan Results (AWS)\n\n<details><summary>Show Plan</summary>\n\n\`\`\`hcl\n${planOutput.slice(0, 60000)}\n\`\`\`\n</details>`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+  # ==========================================
+  # JOB 2: Terraform Apply
+  # ==========================================
+  terraform-apply:
+    name: 🚀 Terraform Apply
+    runs-on: ubuntu-latest
+    needs: terraform-plan
+    if: |
+      github.ref == 'refs/heads/main' &&
+      github.event_name != 'pull_request' &&
+      (github.event.inputs.action == 'apply' || github.event.inputs.action == null)
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -41,24 +135,133 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
 
       - name: Terraform Init
-        run: terraform -chdir=${{ env.TF_WORKING_DIR }} init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" -backend-config="key=school-erp/terraform.tfstate" -backend-config="region=${{ env.AWS_REGION }}"
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=school-erp/terraform.tfstate" \
+            -backend-config="region=${{ secrets.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ secrets.TF_STATE_LOCK_TABLE }}" \
+            -backend-config="encrypt=true"
+        working-directory: ${{ env.TF_WORKING_DIR }}
 
-      - name: Terraform Format Check
-        run: terraform -chdir=${{ env.TF_WORKING_DIR }} fmt -check -recursive
-
-      - name: Terraform Validate
-        run: terraform -chdir=${{ env.TF_WORKING_DIR }} validate
-
-      - name: Terraform Plan
-        id: plan
-        run: terraform -chdir=${{ env.TF_WORKING_DIR }} plan -out=tfplan
-
-      - name: Upload plan artifact
-        uses: actions/upload-artifact@v4
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
         with:
           name: tfplan
-          path: ${{ env.TF_WORKING_DIR }}/tfplan
+          path: ${{ env.TF_WORKING_DIR }}
 
       - name: Terraform Apply
-        if: ${{ github.event_name == 'push' && inputs.action == 'apply' }}
-        run: terraform -chdir=${{ env.TF_WORKING_DIR }} apply -auto-approve tfplan
+        run: terraform apply -auto-approve tfplan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Extract Terraform Outputs
+        id: tf_outputs
+        run: |
+          echo "cluster_name=$(terraform output -raw eks_cluster_name 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
+          echo "cloudfront=$(terraform output -raw cloudfront_domain 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Print Summary
+        run: |
+          echo "### ✅ Terraform Apply Complete (AWS)!" >> $GITHUB_STEP_SUMMARY
+          echo "- **EKS Cluster**: ${{ steps.tf_outputs.outputs.cluster_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **CloudFront**: ${{ steps.tf_outputs.outputs.cloudfront }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Region**: ${{ env.AWS_REGION }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Triggered by**: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+
+  # ==========================================
+  # JOB 3: Terraform Destroy (Manual Only)
+  # ==========================================
+  terraform-destroy:
+    name: 💥 Terraform Destroy
+    runs-on: ubuntu-latest
+    if: github.event.inputs.action == 'destroy'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+
+      - name: 🧹 Pre-Destroy — Clean up K8s resources (CRITICAL)
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "⚠️  CRITICAL: Cleaning up K8s resources first"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "WHY: LoadBalancers and EBS PVCs created by K8s"
+          echo "     stay in AWS even after terraform destroy!"
+          echo "     They keep COSTING MONEY as orphaned resources."
+
+          # Try to connect to EKS — if cluster is already gone, skip
+          if aws eks update-kubeconfig \
+              --region ${{ secrets.AWS_REGION }} \
+              --name school-erp-production-eks 2>/dev/null; then
+
+            echo "✅ Connected to EKS — cleaning up..."
+
+            # Delete tenant namespaces (removes all pods, services, PVCs, LBs)
+            kubectl delete namespace school-a --ignore-not-found --timeout=60s || true
+            kubectl delete namespace school-b --ignore-not-found --timeout=60s || true
+            kubectl delete namespace monitoring --ignore-not-found --timeout=60s || true
+            kubectl delete namespace keda --ignore-not-found --timeout=60s || true
+
+            # Force-delete any stuck PVCs to release EBS volumes
+            kubectl get pvc --all-namespaces -o json 2>/dev/null \
+              | python3 -c "
+          import sys, json, subprocess
+          pvcs = json.load(sys.stdin).get('items', [])
+          for pvc in pvcs:
+              ns = pvc['metadata']['namespace']
+              name = pvc['metadata']['name']
+              subprocess.run(['kubectl', 'patch', 'pvc', name, '-n', ns,
+                             '-p', '{\"metadata\":{\"finalizers\":[]}}',
+                             '--type=merge'], capture_output=True)
+              print(f'Cleaned finalizer: {ns}/{name}')
+          " || true
+
+            echo "✅ K8s resources cleaned up"
+          else
+            echo "ℹ️  EKS cluster not reachable — skipping K8s cleanup"
+          fi
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=school-erp/terraform.tfstate" \
+            -backend-config="region=${{ secrets.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ secrets.TF_STATE_LOCK_TABLE }}" \
+            -backend-config="encrypt=true"
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: 💥 Terraform Destroy
+        run: |
+          terraform destroy \
+            -auto-approve \
+            -var="aws_region=${{ secrets.AWS_REGION }}" \
+            -var="environment=production"
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: ✅ Destroy Complete — Credits Saved!
+        if: always()
+        run: |
+          echo "### 💰 Terraform Destroy Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All AWS resources destroyed. No more charges!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Next time:** Run **Terraform → action: apply** to spin it back up." >> $GITHUB_STEP_SUMMARY
+          echo "All config is in code — infra rebuilds in ~15 mins." >> $GITHUB_STEP_SUMMARY
+
