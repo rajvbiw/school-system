@@ -147,14 +147,14 @@ jobs:
             | python3 -c "import sys,json; s=json.load(sys.stdin); print(s['outputs']['elasticache_endpoint']['value'])" 2>/dev/null || echo '')
 
           if [ -n "$RDS_HOST" ]; then
-            sed -i "s|RDS_ENDPOINT_PLACEHOLDER|${RDS_HOST}|g" k8s/base/configmap.yaml
+            sed -i "s|RDS_ENDPOINT_PLACEHOLDER|${RDS_HOST}|g" k8s/configmap.yaml
             echo "✅ RDS endpoint injected: ${RDS_HOST}"
           else
             echo "⚠️  RDS endpoint not found — keeping placeholder"
           fi
 
           if [ -n "$REDIS_HOST" ]; then
-            sed -i "s|ELASTICACHE_ENDPOINT_PLACEHOLDER|${REDIS_HOST}|g" k8s/base/configmap.yaml
+            sed -i "s|ELASTICACHE_ENDPOINT_PLACEHOLDER|${REDIS_HOST}|g" k8s/configmap.yaml
             echo "✅ ElastiCache endpoint injected: ${REDIS_HOST}"
           else
             echo "⚠️  ElastiCache endpoint not found — keeping placeholder"
@@ -162,73 +162,34 @@ jobs:
 
       - name: 🧹 Clean up legacy resources
         run: |
-          # Remove old HPA conflicts
-          kubectl delete hpa backend-hpa -n school-a --ignore-not-found
-          kubectl delete hpa backend-hpa -n school-b --ignore-not-found
-          # Delete legacy ingress resources (migrating to LoadBalancer services)
-          kubectl delete ingress school-erp-ingress -n school-a --ignore-not-found || true
-          kubectl delete ingress school-erp-ingress -n school-b --ignore-not-found || true
-          # Remove in-cluster MySQL (prod uses RDS)
-          for ns in school-a school-b; do
-            kubectl delete statefulset mysql -n "$ns" --ignore-not-found || true
-            kubectl delete service mysql -n "$ns" --ignore-not-found || true
-          done
-          echo "✅ Legacy resources cleaned up"
+          echo "No legacy cleanup needed"
 
       - name: 🧹 Scale down to 0 first (release IPs before new deploy)
         run: |
-          echo "Scaling down all deployments to release ENI IP addresses..."
-          for ns in school-a school-b; do
-            kubectl scale deployment school-erp-backend  --replicas=0 -n "$ns" --ignore-not-found || true
-            kubectl scale deployment school-erp-frontend --replicas=0 -n "$ns" --ignore-not-found || true
-          done
-          echo "⏳ Waiting 30s for pods to terminate and IPs to be freed..."
-          sleep 30
-          echo "✅ IPs freed — proceeding to deploy"
+          echo "Scaling down deployments in school-erp..."
+          kubectl scale deployment school-erp-backend --replicas=0 -n school-erp --ignore-not-found || true
+          kubectl scale deployment school-erp-frontend --replicas=0 -n school-erp --ignore-not-found || true
+          echo "⏳ Waiting 15s for pods to terminate..."
+          sleep 15
 
-      - name: Deploy Tenant School A
+      - name: Deploy to EKS (school-erp namespace)
         env:
           TAG: ${{ needs.pre-deploy.outputs.image_tag }}
         run: |
-          cd k8s/tenants/school-a
-          sed -i "s|BACKEND_NEWIMAGE_PLACEHOLDER|${{ env.BACKEND_IMAGE }}|g" kustomization.yaml
-          sed -i "s|FRONTEND_NEWIMAGE_PLACEHOLDER|${{ env.FRONTEND_IMAGE }}|g" kustomization.yaml
-          sed -i "s|BACKEND_NEWTAG_PLACEHOLDER|${TAG}|g" kustomization.yaml
-          sed -i "s|FRONTEND_NEWTAG_PLACEHOLDER|${TAG}|g" kustomization.yaml
-          echo "--- School A Kustomization ---"
-          cat kustomization.yaml
-          kubectl apply -k .
+          # 1. Replace placeholders in the manifest files
+          sed -i "s|TENANT_SLUG|school-erp|g" k8s/namespace.yaml
+          sed -i "s|PLACEHOLDER|school-erp|g" k8s/configmap.yaml
+          sed -i "s|BACKEND_IMAGE_PLACEHOLDER|${{ env.BACKEND_IMAGE }}|g" k8s/deployment-backend.yaml
+          sed -i "s|:latest|:${TAG}|g" k8s/deployment-backend.yaml
+          sed -i "s|FRONTEND_IMAGE_PLACEHOLDER|${{ env.FRONTEND_IMAGE }}|g" k8s/deployment-frontend.yaml
+          sed -i "s|:latest|:${TAG}|g" k8s/deployment-frontend.yaml
 
-      - name: Deploy Tenant School B
-        env:
-          TAG: ${{ needs.pre-deploy.outputs.image_tag }}
-        run: |
-          cd k8s/tenants/school-b
-          sed -i "s|BACKEND_NEWIMAGE_PLACEHOLDER|${{ env.BACKEND_IMAGE }}|g" kustomization.yaml
-          sed -i "s|FRONTEND_NEWIMAGE_PLACEHOLDER|${{ env.FRONTEND_IMAGE }}|g" kustomization.yaml
-          sed -i "s|BACKEND_NEWTAG_PLACEHOLDER|${TAG}|g" kustomization.yaml
-          sed -i "s|FRONTEND_NEWTAG_PLACEHOLDER|${TAG}|g" kustomization.yaml
-          echo "--- School B Kustomization ---"
-          cat kustomization.yaml
-          kubectl apply -k .
-
-      - name: 🧹 Remove Monitoring Stack (Save IPs on small cluster)
-        run: |
-          kubectl delete -f k8s/monitoring/prometheus.yaml --ignore-not-found || true
-          kubectl delete -f k8s/monitoring/grafana.yaml --ignore-not-found || true
-          kubectl delete -f k8s/monitoring/prometheus-config.yaml --ignore-not-found || true
-          echo "✅ Monitoring stack removed (saves 3 Pod IPs)"
-
-      - name: 🧹 Remove stale PVC finalizers (non-blocking)
-        run: |
-          for ns in school-a school-b; do
-            if kubectl get pvc school-erp-uploads-pvc -n "$ns" &>/dev/null; then
-              kubectl patch pvc school-erp-uploads-pvc -n "$ns" \
-                -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
-              kubectl delete pvc school-erp-uploads-pvc -n "$ns" --ignore-not-found --wait=false
-            fi
-          done
-          echo "✅ PVC cleanup done"
+          # 2. Deploy manifests
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/configmap.yaml -n school-erp
+          kubectl apply -f k8s/secret.yaml -n school-erp
+          kubectl apply -f k8s/deployment-backend.yaml -n school-erp
+          kubectl apply -f k8s/deployment-frontend.yaml -n school-erp
 
       - name: ⏳ Verify Rollout Status
         run: |
@@ -244,95 +205,54 @@ jobs:
             echo ""
             echo "📝 Backend pod logs (last 50 lines):"
             kubectl logs -n "$ns" -l app=school-erp-backend --tail=50 --ignore-errors || true
-            echo ""
-            echo "📝 Backend pod description:"
-            kubectl describe pods -n "$ns" -l app=school-erp-backend | tail -60 || true
           }
 
-          echo "⏳ Checking rollout status in school-a..."
-          if ! kubectl rollout status deployment/school-erp-backend -n school-a --timeout=300s; then
-            debug_namespace school-a
+          echo "⏳ Checking rollout status in school-erp..."
+          if ! kubectl rollout status deployment/school-erp-backend -n school-erp --timeout=300s; then
+            debug_namespace school-erp
             exit 1
           fi
-          if ! kubectl rollout status deployment/school-erp-frontend -n school-a --timeout=300s; then
-            debug_namespace school-a
+          if ! kubectl rollout status deployment/school-erp-frontend -n school-erp --timeout=300s; then
+            debug_namespace school-erp
             exit 1
           fi
+          echo "✅ Deployments rolled out successfully!"
 
-          echo "⏳ Checking rollout status in school-b..."
-          if ! kubectl rollout status deployment/school-erp-backend -n school-b --timeout=300s; then
-            debug_namespace school-b
-            exit 1
-          fi
-          if ! kubectl rollout status deployment/school-erp-frontend -n school-b --timeout=300s; then
-            debug_namespace school-b
-            exit 1
-          fi
-
-          echo "✅ All deployments rolled out successfully!"
-
-      - name: 🌱 Seed Databases
+      - name: 🌱 Seed Database
         run: |
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "🌱 Seeding Database for School A..."
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          if ! kubectl exec -n school-a deployment/school-erp-backend -- node dist/database/seed.js; then
-            echo "❌ Failed to seed database for school-a!"
-            echo "📋 Backend pod logs for school-a:"
-            kubectl logs -n school-a deployment/school-erp-backend --tail=100 || true
+          echo "🌱 Seeding Database for school-erp..."
+          sleep 5
+          if ! kubectl exec -n school-erp deployment/school-erp-backend -- node dist/database/seed.js; then
+            echo "❌ Failed to seed database!"
+            kubectl logs -n school-erp deployment/school-erp-backend --tail=100 || true
             exit 1
           fi
-          echo "✅ School A Database seeded successfully"
-
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "🌱 Seeding Database for School B..."
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          if ! kubectl exec -n school-b deployment/school-erp-backend -- node dist/database/seed.js; then
-            echo "❌ Failed to seed database for school-b!"
-            echo "📋 Backend pod logs for school-b:"
-            kubectl logs -n school-b deployment/school-erp-backend --tail=100 || true
-            exit 1
-          fi
-          echo "✅ School B Database seeded successfully"
+          echo "✅ Database seeded successfully"
 
       - name: 📊 Generate Deployment Summary
         run: |
-          echo "Waiting for School A LoadBalancer URL..."
-          SCHOOL_A_LB=""
+          echo "Waiting for LoadBalancer URL..."
+          LB_URL=""
           for i in {1..12}; do
-            SCHOOL_A_LB=$(kubectl get svc frontend -n school-a -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo '')
-            if [ -n "$SCHOOL_A_LB" ]; then break; fi
+            LB_URL=$(kubectl get svc school-erp-frontend -n school-erp -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo '')
+            if [ -n "$LB_URL" ]; then break; fi
             echo "Waiting 10s..."
             sleep 10
           done
 
-          echo "Waiting for School B LoadBalancer URL..."
-          SCHOOL_B_LB=""
-          for i in {1..12}; do
-            SCHOOL_B_LB=$(kubectl get svc frontend -n school-b -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo '')
-            if [ -n "$SCHOOL_B_LB" ]; then break; fi
-            echo "Waiting 10s..."
-            sleep 10
-          done
-
-          [ -z "$SCHOOL_A_LB" ] && SCHOOL_A_LB="⚠️ Provisioning... Run: kubectl get svc frontend -n school-a"
-          [ -z "$SCHOOL_B_LB" ] && SCHOOL_B_LB="⚠️ Provisioning... Run: kubectl get svc frontend -n school-b"
+          [ -z "$LB_URL" ] && LB_URL="⚠️ Provisioning... Run: kubectl get svc school-erp-frontend -n school-erp"
 
           echo "### 🚀 School ERP — Deployment Complete!" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "🌐 **School A Access URL:** [http://${SCHOOL_A_LB}/](http://${SCHOOL_A_LB}/)" >> $GITHUB_STEP_SUMMARY
-          echo "🌐 **School B Access URL:** [http://${SCHOOL_B_LB}/](http://${SCHOOL_B_LB}/)" >> $GITHUB_STEP_SUMMARY
+          echo "🌐 **Access URL:** [http://${LB_URL}/](http://${LB_URL}/)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Tenant | Service Type | Direct Clickable URL |" >> $GITHUB_STEP_SUMMARY
-          echo "| --- | --- | --- |" >> $GITHUB_STEP_SUMMARY
-          echo "| **School A** | LoadBalancer | [http://${SCHOOL_A_LB}/](http://${SCHOOL_A_LB}/) |" >> $GITHUB_STEP_SUMMARY
-          echo "| **School B** | LoadBalancer | [http://${SCHOOL_B_LB}/](http://${SCHOOL_B_LB}/) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Service Type | Direct Clickable URL |" >> $GITHUB_STEP_SUMMARY
+          echo "| --- | --- |" >> $GITHUB_STEP_SUMMARY
+          echo "| LoadBalancer | [http://${LB_URL}/](http://${LB_URL}/) |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "#### Pod Status" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          kubectl get pods -n school-a >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          kubectl get pods -n school-b >> $GITHUB_STEP_SUMMARY
+          kubectl get pods -n school-erp >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
   # ==========================================
@@ -364,22 +284,17 @@ jobs:
 
       - name: Verify all pods running
         run: |
-          echo "=== school-a pods ==="
-          kubectl get pods -n school-a
-          echo ""
-          echo "=== school-b pods ==="
-          kubectl get pods -n school-b
+          echo "=== school-erp pods ==="
+          kubectl get pods -n school-erp
 
-          for ns in school-a school-b; do
-            CRASH_PODS=$(kubectl get pods -n "$ns" \
-              --field-selector=status.phase!=Running \
-              --no-headers 2>/dev/null | grep -v "Completed" | wc -l)
-            if [ "$CRASH_PODS" -gt "0" ]; then
-              echo "❌ Some pods in $ns are not healthy!"
-              exit 1
-            fi
-            echo "✅ All pods in $ns are running."
-          done
+          CRASH_PODS=$(kubectl get pods -n school-erp \
+            --field-selector=status.phase!=Running \
+            --no-headers 2>/dev/null | grep -v "Completed" | wc -l)
+          if [ "$CRASH_PODS" -gt "0" ]; then
+            echo "❌ Some pods in school-erp are not healthy!"
+            exit 1
+          fi
+          echo "✅ All pods in school-erp are running."
 
   # ==========================================
   # JOB 4: Notify Deploy
