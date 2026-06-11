@@ -1,5 +1,0 @@
-apiVersion: v2
-name: school-erp
-description: Multi-tenant School ERP on AWS EKS
-version: 1.0.0
-appVersion: 1.0.0
