@@ -32,10 +32,6 @@ module "vpc" {
   environment  = var.environment
 }
 
-module "ecr" {
-  source = "./modules/ecr"
-}
-
 module "eks" {
   source                 = "./modules/eks"
   vpc_id                 = module.vpc.vpc_id
@@ -54,44 +50,3 @@ module "rds" {
   instance_class     = var.rds_instance_class
 }
 
-module "elasticache" {
-  source             = "./modules/elasticache"
-  vpc_id             = module.vpc.vpc_id
-  private_subnet_ids = module.vpc.private_subnet_ids
-  eks_security_group = module.eks.cluster_security_group_id
-}
-
-module "s3" {
-  source = "./modules/s3"
-}
-
-module "cloudfront" {
-  source                     = "./modules/cloudfront"
-  s3_bucket_regional_domain = module.s3.assets_bucket_regional_domain
-  acm_certificate_arn        = module.acm.certificate_arn
-}
-
-module "acm" {
-  source      = "./modules/acm"
-  domain_name = var.domain_name
-}
-
-module "route53" {
-  source            = "./modules/route53"
-  domain_name       = var.domain_name
-  cloudfront_domain = module.cloudfront.domain_name
-}
-
-module "iam" {
-  source        = "./modules/iam"
-  oidc_provider = module.eks.oidc_provider
-}
-
-module "secrets_manager" {
-  source = "./modules/secrets_manager"
-}
-
-module "cloudwatch" {
-  source      = "./modules/cloudwatch"
-  alert_email = var.alert_email
-}
