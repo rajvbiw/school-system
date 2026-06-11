@@ -1,0 +1,144 @@
+# ── ServiceAccount (needed by backend pods) ───────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: school-erp-sa
+
+---
+# ── Backend Deployment ────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: school-erp-backend
+  labels:
+    app: school-erp-backend
+    component: backend
+spec:
+  # Start with 1 replica — KEDA ScaledObject will manage scaling.
+  # EBS (ReadWriteOnce) cannot attach to multiple nodes simultaneously,
+  # so we use emptyDir for uploads instead of a PVC.
+  replicas: 1
+  # Enough time for DB connection + sequelize.sync(alter:true) on startup
+  progressDeadlineSeconds: 600
+  selector:
+    matchLabels:
+      app: school-erp-backend
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: school-erp-backend
+        component: backend
+        force-rollout: "true"
+    spec:
+      serviceAccountName: school-erp-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+      containers:
+        - name: backend
+          image: BACKEND_IMAGE_PLACEHOLDER:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 5000
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "300m"
+              memory: "256Mi"
+          env:
+            - name: NODE_ENV
+              valueFrom:
+                configMapKeyRef:
+                  name: school-erp-config
+                  key: NODE_ENV
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: school-erp-config
+                  key: DB_HOST
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: school-erp-config
+                  key: DB_NAME
+            - name: REDIS_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: school-erp-config
+                  key: REDIS_HOST
+            - name: PORT
+              value: "5000"
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: school-erp-secret
+                  key: DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: school-erp-secret
+                  key: DB_PASSWORD
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: school-erp-secret
+                  key: REDIS_PASSWORD
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: school-erp-secret
+                  key: JWT_SECRET
+            - name: JWT_REFRESH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: school-erp-secret
+                  key: JWT_REFRESH_SECRET
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            # Give the app 60s to start and connect to DB before first liveness check
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              # /health is DB-independent (always returns 200 once Express starts)
+              # /ready requires DB connectivity — avoid for readiness to prevent stuck pods
+              path: /health
+              port: 5000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - name: uploads
+              mountPath: /usr/src/app/uploads
+      volumes:
+        - name: uploads
+          # emptyDir avoids EBS ReadWriteOnce multi-node attachment issues.
+          # For production persistent uploads, use EFS (ReadWriteMany) instead.
+          emptyDir: {}
+      terminationGracePeriodSeconds: 30
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: school-erp-backend
+spec:
+  ports:
+    - port: 5000
+      targetPort: 5000
+      protocol: TCP
+  selector:
+    app: school-erp-backend
+  type: ClusterIP
