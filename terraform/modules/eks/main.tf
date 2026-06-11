@@ -29,7 +29,7 @@ resource "aws_security_group" "eks" {
 
 resource "aws_eks_cluster" "main" {
   name     = "school-erp-cluster"
-  version  = "1.29"
+  version  = "1.30"
   role_arn = aws_iam_role.cluster.arn
   vpc_config {
     subnet_ids              = var.private_subnet_ids
