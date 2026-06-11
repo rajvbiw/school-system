@@ -1,0 +1,77 @@
+name: Deploy – Kubernetes Application
+
+on:
+  workflow_run:
+    workflows: ["Terraform – Infrastructure Provisioning"]
+    types:
+      - completed
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+
+jobs:
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Retrieve EKS kubeconfig
+        run: |
+          aws eks update-kubeconfig --name $(terraform -chdir=./infra/terraform output -raw eks_cluster_name) --region ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # -------------------------- Backend image --------------------------
+      - name: Build & push Backend image
+        env:
+          REPO: ${{ steps.ecr-login.outputs.registry }}/${{ vars.ECR_REPO_BACKEND || "school-erp-backend" }}
+          TAG: ${{ github.sha }}
+        run: |
+          docker build -f backend/Dockerfile -t $REPO:$TAG .
+          docker push $REPO:$TAG
+
+      # -------------------------- Frontend image --------------------------
+      - name: Build & push Frontend image
+        env:
+          REPO: ${{ steps.ecr-login.outputs.registry }}/${{ vars.ECR_REPO_FRONTEND || "school-erp-frontend" }}
+          TAG: ${{ github.sha }}
+        run: |
+          docker build -f frontend/Dockerfile -t $REPO:$TAG .
+          docker push $REPO:$TAG
+
+      # -------------------------- Update Helm values --------------------------
+      - name: Update Helm values with new image tags
+        run: |
+          yq eval ".backend.image.repository = \"${{ steps.ecr-login.outputs.registry }}/${{ vars.ECR_REPO_BACKEND || \"school-erp-backend\" }}\" | \
+                  .backend.image.tag = \"${{ github.sha }}\" | \
+                  .frontend.image.repository = \"${{ steps.ecr-login.outputs.registry }}/${{ vars.ECR_REPO_FRONTEND || \"school-erp-frontend\" }}\" | \
+                  .frontend.image.tag = \"${{ github.sha }}\" | \
+                  .ingress.host = \"${{ secrets.INGRESS_HOST }}\"" -i helm/school-erp/values.yaml
+
+      # -------------------------- Deploy Helm chart --------------------------
+      - name: Deploy/Upgrade Helm chart
+        run: |
+          helm upgrade --install school-erp ./helm/school-erp \
+            --namespace erp \
+            --create-namespace \
+            -f ./helm/school-erp/values.yaml
+
+      # -------------------------- Optional Monitoring --------------------------
+      - name: Deploy Prometheus & Grafana (optional)
+        if: ${{ secrets.DEPLOY_MONITORING == 'true' }}
+        run: |
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo update
+          helm upgrade --install prometheus-stack prometheus-community/kube-prometheus-stack \
+            --namespace monitoring \
+            --create-namespace
