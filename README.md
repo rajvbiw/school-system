@@ -1,42 +1,88 @@
-# Multi-Tenant School ERP + EdTech Platform
+# Multi-Tenant School ERP + EdTech Platform with AI Diagnostics
 
-A production-ready, multi-tenant school management and online learning platform. Each school tenant gets isolated namespaces, dedicated branding (custom emblems and HSL primary colors), and secure isolated database contexts. The system provides modules for role-specific dashboards, daily attendance markings, grading report cards, student file submissions, and billing checkout integrations.
+A production-ready, multi-tenant SaaS school management and online learning platform. Features include role-specific dashboards, daily attendance tracking, automated grading report cards, student assignment submissions, and a built-in AI Student Performance Diagnostics engine. 
 
----
-
-## Infrastructure Architecture
-
-### System Topology Map (ASCII)
-```
-Browser (school-a.edtech.com) ──> Route53 ──> CloudFront (Assets) ──> ALB (EKS Ingress)
-                                                                            │
-   ┌───────────────────────────────── EKS Cluster ──────────────────────────┴───────────────┐
-   │                                                                                        │
-   │   ┌── Namespace: school-a ──────────────────┐   ┌── Namespace: school-b ────────────┐   │
-   │   │  Frontend Pod ──> Backend Pod           │   │  Frontend Pod ──> Backend Pod     │   │
-   │   └─────────────────────│───────────────────┘   └─────────────────────│─────────────┘   │
-   │                         └───────────────┐   ┌─────────────────────────┘                 │
-   └─────────────────────────────────────────┼───┼──────────────────────────────────────────┘
-                                             ▼   ▼
-                                    RDS MySQL (Private) + ElastiCache Redis (Private)
-                                    S3 Buckets (Uploads via Pre-signed URLs)
-```
-
-1. **Routing Layer**: Route53 routes requests to CloudFront (for built static assets) or the Application Load Balancer (ALB) acting as EKS Ingress.
-2. **Compute (EKS)**: Deployed using Kubernetes namespaces per school tenant (e.g. `school-a`, `school-b`). Each namespace contains backend and frontend pods running isolated contexts.
-3. **Database & Caching**: Backend pods query a private RDS MySQL database and cache student transcripts in ElastiCache Redis.
-4. **Continuous Deployment**: GitHub Actions directly deploys container images to target namespaces on the EKS cluster.
+The application is deployed on a highly available, secure, and auto-scaled AWS EKS (Kubernetes 1.30) cluster connected to an AWS RDS MySQL database.
 
 ---
 
-## Prerequisites
+## System Architecture
 
-Ensure the following tools are installed:
-- **Node.js v18** and **npm**
-- **Docker** and **docker-compose**
-- **AWS CLI v2** (configured with target deploy credentials)
-- **Terraform v1.5.0+**
-- **kubectl** and **helm v3**
+```
+                                      [ Internet ]
+                                           │
+                                           ▼
+                                    [ Route 53 DNS ]
+                                           │
+                                           ▼
+                               [ Internet Gateway (IGW) ]
+                                           │
+                                           ▼
+                             [ Network Load Balancer (NLB) ]
+                                           │
+                                           ▼
+┌───────────────────────────────── AWS VPC (ap-south-1) ────────────────────────────────┐
+│                                                                                       │
+│   ┌─────────────────────────── AWS EKS Cluster (v1.30) ───────────────────────────┐   │
+│   │                                                                               │   │
+│   │   ┌── Namespace: school-erp ────────────────┐   ┌── Namespace: monitoring ──┐  │   │
+│   │   │                                         │   │                          │  │   │
+│   │   │  Frontend Pod   ──>  Backend Pod        │   │        Prometheus        │  │   │
+│   │   │  (React + Nginx)     (Node.js/Express)  │   │            │             │  │   │
+│   │   └───────────────────────────│─────────────┘   │            ▼             │  │   │
+│   │                               │                 │         Grafana          │  │   │
+│   │                               │                 └────────────┬─────────────┘  │   │
+│   └───────────────────────────────┼──────────────────────────────┼────────────────┘   │
+│                                   ▼                              ▼                    │
+│                        [ Private Database Subnet ]   [ API Server Secure Proxy ]      │
+│                        - AWS RDS MySQL               - Node & cAdvisor Metrics        │
+│                        - AWS ElastiCache Redis                                        │
+└───────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Directory Structure
+
+In accordance with our production-aligned cleanup, the infrastructure and deployment configurations are organized as follows:
+
+```
+├── .github/workflows/
+│   ├── ci.yml                 # Build and test pipeline
+│   ├── deploy.yml             # EKS Deployment pipeline
+│   └── terraform.yml          # Infrastructure planning & applying
+├── k8s/
+│   ├── configmap.yaml         # Global environment variables
+│   ├── deployment-backend.yaml# Backend Deployment & ClusterIP Service
+│   ├── deployment-frontend.yaml# Frontend Deployment & LoadBalancer Service
+│   ├── namespace.yaml         # Unified "school-erp" namespace
+│   └── secret.yaml            # Base64 database and JWT credentials
+├── terraform/
+│   ├── main.tf                # Main configuration calls (VPC, EKS, RDS)
+│   ├── variables.tf           # Global input variables
+│   ├── outputs.tf             # Outputs (endpoints, SG IDs)
+│   └── modules/
+│       ├── vpc/               # Dynamic Subnets & IGW setup
+│       ├── eks/               # Kubernetes cluster v1.30 & Node Group
+│       └── rds/               # Secured Private Database subnet group
+```
+
+---
+
+## Core DevOps Engineering Highlights
+
+* **VPC CNI Prefix Delegation:** Configured on the EKS DaemonSet to boost pod allocation limits on cost-effective `t3.small` nodes from 11 up to 110 IP addresses per node.
+* **Express Trust Proxy Configuration:** Enabled `trust proxy` inside the Express application so that `express-rate-limit` correctly processes client IPs through the Nginx reverse proxy.
+* **RDS Node-to-Node Security Group Binding:** Bound EKS worker nodes' shared SG dynamically to RDS inbound access to permit secure database migrations and syncs.
+* **Secure API Server Proxy Scraping:** Configured Prometheus to scrape node and container metrics (cAdvisor) securely via the Kubernetes API Server proxy, bypassing network security group blocks on Kubelet's port `10250`.
+
+---
+
+## Core Features
+
+* **Multi-Tenant Routing:** Automatic tenant resolution from custom headers (`X-Tenant-Slug`) or subdomains, mapping user sessions to isolated database contexts.
+* **AI Student Diagnostics Engine:** Integrates a custom analytical pedagogical service (`/api/academic/ai-performance-analysis`) that evaluates student performance against class averages and attendance ratios to generate automated performance reports and targeted remedial suggestions.
+* **Real-time Communication:** Built-in Socket.io integration inside EKS to broadcast immediate announcements and events across namespaces.
 
 ---
 
@@ -46,8 +92,8 @@ To run the application locally on your developer machine:
 
 1. **Clone the repository**:
    ```bash
-   git clone <repository-url> school-erp
-   cd school-erp
+   git clone <repository-url> school-system
+   cd school-system
    ```
 
 2. **Configure Environment Variables**:
@@ -56,171 +102,82 @@ To run the application locally on your developer machine:
    ```
 
 3. **Launch Docker Services**:
-   This spins up MySQL, Redis, Adminer (DB dashboard), Backend, and Frontend.
    ```bash
    docker-compose up --build
    ```
 
 4. **Initialize & Seed the Database**:
-   Open a separate shell and execute the migrations inside the running backend container:
+   Open a separate terminal and execute the seeding script inside the backend container:
    ```bash
-   docker exec -it school_erp_backend npm run seed
+   docker exec -it school-system-backend-1 npm run seed
    ```
 
-### Local Endpoints
-- **Frontend SPA**: [http://localhost:3000](http://localhost:3000)
-- **Backend API**: [http://localhost:5000](http://localhost:5000)
-- **Adminer DB Client**: [http://localhost:8080](http://localhost:8080) (Use credentials: Host: `mysql`, User: `school_erp_user`, Password: `school_erp_password`, Database: `school_erp_main`)
+* **Frontend SPA:** [http://localhost:3000](http://localhost:3000)
+* **Backend API:** [http://localhost:5000](http://localhost:5000)
 
 ---
 
-## Environment Variables Directory
+## AWS Infrastructure Deployment Guide
 
-| Variable | Description | Default Value |
-| :--- | :--- | :--- |
-| `PORT` | Local express backend server port | `5000` |
-| `JWT_SECRET` | Primary signing key for JWT Access Tokens | `super_secret_jwt_access_key_32_characters_minimum` |
-| `JWT_REFRESH_SECRET` | Signing key for JWT Refresh Tokens | `super_secret_jwt_refresh_key_32_characters_minimum` |
-| `DB_HOST` | MySQL hostname (docker service name locally) | `127.0.0.1` |
-| `REDIS_HOST` | Redis cache service address | `127.0.0.1` |
-| `S3_BUCKET_NAME` | AWS S3 Bucket for attachments and profile pictures | `school-erp-uploads` |
-
----
-
-## GitHub Actions Secret Setup
-
-To configure the GitHub Actions workflow, save these secrets in your repository settings:
-
-| GitHub Secret | Description |
-| :--- | :--- |
-| `AWS_ACCOUNT_ID` | AWS Account identifier for ECR registry target |
-| `AWS_REGION` | AWS Region (e.g. `us-east-1`) |
-| `AWS_ROLE_ARN` | IAM Role ARN assumed by GitHub Actions via OIDC |
-| `SLACK_WEBHOOK` | Webhook URL for posting deployment statuses |
-
----
-
-## AWS Deployment Guide
-
-### Step 1: Provision Cloud Resources (Terraform)
-Navigate to the Terraform folder and apply configs:
+### Step 1: Provision Resources via Terraform
+Navigate to the terraform folder, initialize, and apply configs:
 ```bash
-cd terraform/environments/dev
+cd terraform
 terraform init
-terraform workspace select dev || terraform workspace new dev
 terraform apply -auto-approve
 ```
 
-### Step 2: Configure kubectl
-Fetch cluster authentication credentials:
+### Step 2: Configure kubectl local context
+Fetch cluster authentication credentials to manage the EKS cluster:
 ```bash
-aws eks update-kubeconfig --name school-erp-cluster --region us-east-1
+aws eks update-kubeconfig --name school-erp-cluster --region <AWS_REGION>
 ```
 
-### Step 3: Deploy Frontend & Backend to EKS (Helm)
-Deploy school workloads directly using Helm:
+### Step 3: Deploy Application Manifests
+Deploy configuration maps, secrets, deployments, and load balancers to EKS:
 ```bash
-# Deploy Tenant School A
-helm upgrade --install school-a helm/school-erp -f helm/school-erp/values-school-a.yaml -n school-a --create-namespace
-
-# Deploy Tenant School B
-helm upgrade --install school-b helm/school-erp -f helm/school-erp/values-school-b.yaml -n school-b --create-namespace
+kubectl apply -f k8s/namespace.yaml
+kubectl apply -f k8s/configmap.yaml -n school-erp
+kubectl apply -f k8s/secret.yaml -n school-erp
+kubectl apply -f k8s/deployment-backend.yaml -n school-erp
+kubectl apply -f k8s/deployment-frontend.yaml -n school-erp
 ```
 
-Alternatively, you can apply using Kustomize overlays:
+### Step 4: Seed production Database
+Wait for the pods to roll out, and trigger the database seed inside the backend container:
 ```bash
-kubectl apply -k k8s/tenants/school-a
-kubectl apply -k k8s/tenants/school-b
+kubectl exec -n school-erp deployment/school-erp-backend -- node dist/database/seed.js
 ```
-
-### Step 4: Deploy Monitoring Stack (Prometheus & Grafana)
-Deploy Prometheus and Grafana in the cluster to gather metrics and run dashboards:
-```bash
-kubectl apply -f k8s/monitoring/namespace.yaml
-kubectl apply -f k8s/monitoring/prometheus.yaml
-kubectl apply -f k8s/monitoring/grafana.yaml
-```
-
-### Step 5: Retrieve External IP Addresses & Access Dashboards
-Since the Services are defined as `LoadBalancer` type, AWS will provision Network Load Balancers (NLB). Fetch the external DNS addresses:
-
-```bash
-# 1. Access the React Frontend
-kubectl get svc frontend-lb -n school-a
-
-# 2. Access the Prometheus Server
-kubectl get svc prometheus -n monitoring
-
-# 3. Access the Grafana Dashboard
-kubectl get svc grafana -n monitoring
-```
-
-*Note: In AWS EKS, the external IP address is returned as an ELB DNS name. Copy and paste the DNS name into your browser to access the frontend, Prometheus (port 9090), and Grafana (port 80). The default Grafana username is `admin` and password is `admin123`. The Prometheus datasource comes pre-configured.*
 
 ---
 
-## Adding a New School Tenant
+## Deploying Monitoring Stack (Prometheus & Grafana)
 
-To provision a new school (e.g., `school-c`):
-
-1. **Create Value Override File**:
-   Create `helm/school-erp/values-school-c.yaml`:
-   ```yaml
-   tenant:
-     slug: "school-c"
-     name: "Springfield High"
-     primaryColor: "#EC4899"
-   ingress:
-     host: "school-c.edtech.example.com"
-   mysql:
-     database: "school_c_db"
-   ```
-
-2. **Deploy via Helm**:
-   Run the Helm upgrade command to provision the new tenant namespace and workloads:
+1. **Deploy the Monitoring Configurations:**
    ```bash
-   helm upgrade --install school-c helm/school-erp -f helm/school-erp/values-school-c.yaml -n school-c --create-namespace
+   kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/metrics-server/master/deploy/1.8+/deploy.yaml
+   
+   # Apply Prometheus and Grafana manifests (namespace, configurations, services)
+   # (Configurations are mapped via API proxy to read EKS container statistics)
    ```
 
-3. **Or Deploy via Kustomize**:
-   Create a directory `k8s/tenants/school-c`, copy the `kustomization.yaml` from `school-a`, change namespace and literals to `school-c`, and run:
+2. **Access Grafana Dashboard:**
+   Retrieve the external DNS hostname for the Grafana LoadBalancer:
    ```bash
-   kubectl apply -k k8s/tenants/school-c
+   kubectl get svc grafana -n monitoring
    ```
+   *The default credentials are:*
+   * **Username:** `admin`
+   * **Password:** `admin123`
 
 ---
 
-## AWS Free Tier & Cost Minimization Details
-
-To run this platform cost-effectively:
-- **RDS Database**: Uses `db.t3.micro` which is covered under the AWS 12-Month Free Tier (750 hours/month).
-- **Redis Cache**: Uses `cache.t3.micro` which is covered under the AWS 12-Month Free Tier (750 hours/month).
-- **Storage**: S3 bucket uploads use the standard class, providing 5GB free.
-- **EKS Nodes**: The EKS Control Plane costs $0.10/hour, which is a fixed fee. The worker nodes run on `t3.medium` or `t3.small` (minimum 2 nodes) to maintain enough RAM for backend, frontend, Prometheus, and Grafana containers. Using `t3.small` is recommended for maximum cost savings.
-
----
-
-## AWS Cost Breakdown & Estimations
-
-### AWS Free Tier Items Included
-- **RDS MySQL**: db.t3.micro (750 hours free per month on 12-months free tier)
-- **ElastiCache Redis**: cache.t3.micro (750 hours free per month on 12-months free tier)
-- **S3 Standard**: 5GB Storage (12-months free tier)
-
-### Paid Resources (Approximate Costs)
-- **EKS Control Plane**: $0.10/hour (~$72/month)
-- **EKS worker nodes (EC2)**: 2x t3.medium (~$60/month total)
-- **Application Load Balancer**: ~$20/month
-- **VPC NAT Gateway**: ~$32/month
-
-*Staging/Dev estimate runs around $10-20/month if scaled down outside operations hours using KEDA triggers, and production hosting spans $150-200/month.*
-
----
-
-## Default Demo Logins
+## Default Seeded Demo Logins
 
 | Tenant | Role | Email | Password |
 | :--- | :--- | :--- | :--- |
+| **school-erp** | Admin | `admin@school-erp.com` | `password123` |
+| **school-erp** | Teacher | `teacher1@school-erp.com` | `password123` |
 | **school-a** | Admin | `admin@school-a.com` | `password123` |
 | **school-a** | Teacher | `teacher1@school-a.com` | `password123` |
 | **school-a** | Student | `student1@school-a.com` | `password123` |
