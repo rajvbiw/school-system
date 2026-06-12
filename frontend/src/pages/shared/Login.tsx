@@ -8,7 +8,7 @@ import useTenant from '../../hooks/useTenant';
 export const Login: React.FC = () => {
   const navigate = useNavigate();
   const { login, user } = useAuth();
-  const { tenantSlug, tenantInfo, setTenantSlug } = useTenant();
+  const { tenantSlug, tenantInfo, setTenantSlug, clearTenant } = useTenant();
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -68,8 +68,17 @@ export const Login: React.FC = () => {
             <h2 className="text-2xl font-black tracking-tight text-slate-800 dark:text-white font-sans uppercase">
               {tenantInfo?.name || 'School ERP'}
             </h2>
-            <p className="text-slate-400 text-xs font-semibold tracking-wider">
-              {tenantSlug ? `Portal Authentication - ${tenantSlug}` : 'Multi-Tenant Portal Login'}
+            <p className="text-slate-400 text-xs font-semibold tracking-wider flex items-center justify-center gap-1.5">
+              <span>{tenantSlug ? `Portal Authentication - ${tenantSlug}` : 'Multi-Tenant Portal Login'}</span>
+              {tenantSlug && (
+                <button 
+                  type="button" 
+                  onClick={clearTenant} 
+                  className="text-primary hover:underline font-bold text-[10px] uppercase tracking-wider cursor-pointer"
+                >
+                  (Change)
+                </button>
+              )}
             </p>
           </div>
         </div>
