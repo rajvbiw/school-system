@@ -145,6 +145,11 @@ export const Login: React.FC = () => {
             {showDemoCredentials && (
               <div className="mt-3 text-[10px] leading-relaxed text-left max-h-40 overflow-y-auto border border-slate-100 dark:border-slate-800 bg-slate-50/50 p-3 rounded-xl space-y-2.5 scrollbar-thin dark:text-slate-400">
                 <div>
+                  <p className="font-extrabold border-b pb-0.5 border-slate-200">School ERP Portal (school-erp)</p>
+                  <button onClick={() => fillDemo('admin@school-erp.com', 'school-erp')} className="text-primary block font-semibold hover:underline">Admin: admin@school-erp.com</button>
+                  <button onClick={() => fillDemo('teacher1@school-erp.com', 'school-erp')} className="text-primary block font-semibold hover:underline">Teacher: teacher1@school-erp.com</button>
+                </div>
+                <div>
                   <p className="font-extrabold border-b pb-0.5 border-slate-200">Springfield Academy (school-a)</p>
                   <button onClick={() => fillDemo('admin@school-a.com', 'school-a')} className="text-primary block font-semibold hover:underline">Admin: admin@school-a.com</button>
                   <button onClick={() => fillDemo('teacher1@school-a.com', 'school-a')} className="text-primary block font-semibold hover:underline">Teacher: teacher1@school-a.com</button>

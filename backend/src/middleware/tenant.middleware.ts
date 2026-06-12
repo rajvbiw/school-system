@@ -13,8 +13,16 @@ export const resolveTenant = async (req: Request, res: Response, next: NextFunct
     let slug: string | undefined;
     const hostname = req.hostname;
     
-    // Simple subdomain extraction (excludes 'localhost' or raw IPs)
-    if (hostname && !hostname.includes('localhost') && !/^[0-9.]+$/.test(hostname)) {
+    // Simple subdomain extraction (excludes 'localhost', raw IPs, or AWS/Kubernetes system domains)
+    const isSystemDomain = hostname && (
+      hostname.includes('localhost') ||
+      hostname.includes('amazonaws.com') ||
+      hostname.includes('internal') ||
+      hostname.includes('local') ||
+      /^[0-9.]+$/.test(hostname)
+    );
+
+    if (hostname && !isSystemDomain) {
       const parts = hostname.split('.');
       if (parts.length > 2) {
         slug = parts[0];

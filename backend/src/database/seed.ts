@@ -17,7 +17,8 @@ const seedDatabase = async () => {
     // 2. Define Tenant Details
     const tenantsData = [
       { slug: 'school-a', name: 'Springfield Academy', plan: 'pro' as const, primaryColor: '#3B82F6', logoUrl: 'https://images.unsplash.com/photo-1546410531-bb4caa6b424d?w=100' },
-      { slug: 'school-b', name: 'Greenwood Institute', plan: 'enterprise' as const, primaryColor: '#10B981', logoUrl: 'https://images.unsplash.com/photo-1523050854058-8df90110c9f1?w=100' }
+      { slug: 'school-b', name: 'Greenwood Institute', plan: 'enterprise' as const, primaryColor: '#10B981', logoUrl: 'https://images.unsplash.com/photo-1523050854058-8df90110c9f1?w=100' },
+      { slug: 'school-erp', name: 'School ERP Portal', plan: 'pro' as const, primaryColor: '#6366F1', logoUrl: 'https://images.unsplash.com/photo-1546410531-bb4caa6b424d?w=100' }
     ];
 
     for (const tenantInfo of tenantsData) {

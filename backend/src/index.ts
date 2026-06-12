@@ -19,6 +19,7 @@ import { createNotification } from './services/notification.service';
 import { globalRateLimiter } from './middleware/rateLimiter.middleware';
 
 const app = express();
+app.set('trust proxy', true);
 const server = createServer(app);
 
 // Initialize Socket.io

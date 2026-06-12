@@ -29,7 +29,15 @@ export const TenantProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const getSubdomain = (): string | null => {
     const hostname = window.location.hostname;
     // e.g. school-a.edtech.example.com -> school-a
-    if (hostname && !hostname.includes('localhost') && !/^[0-9.]+$/.test(hostname)) {
+    const isSystemDomain = hostname && (
+      hostname.includes('localhost') ||
+      hostname.includes('amazonaws.com') ||
+      hostname.includes('internal') ||
+      hostname.includes('local') ||
+      /^[0-9.]+$/.test(hostname)
+    );
+
+    if (hostname && !isSystemDomain) {
       const parts = hostname.split('.');
       if (parts.length > 2) {
         return parts[0];
@@ -97,6 +105,15 @@ export const TenantProvider: React.FC<{ children: React.ReactNode }> = ({ childr
             primaryColor: '#10B981',
             logoUrl: 'https://images.unsplash.com/photo-1523050854058-8df90110c9f1?w=100',
             plan: 'enterprise'
+          });
+        } else if (tenantSlug === 'school-erp') {
+          setTenantInfo({
+            id: 3,
+            slug: 'school-erp',
+            name: 'School ERP Portal',
+            primaryColor: '#6366F1',
+            logoUrl: 'https://images.unsplash.com/photo-1546410531-bb4caa6b424d?w=100',
+            plan: 'pro'
           });
         }
       } finally {
