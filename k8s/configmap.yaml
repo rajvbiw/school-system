@@ -9,7 +9,7 @@ data:
   # Format: <rds-endpoint>.rds.amazonaws.com
   DB_HOST: "RDS_ENDPOINT_PLACEHOLDER"
   DB_PORT: "3306"
-  DB_NAME: "school_erp"
+  DB_NAME: "school_erp_main"
   # AWS ElastiCache Redis endpoint — set via Terraform output
   # Format: <cache-cluster>.cache.amazonaws.com
   REDIS_HOST: "ELASTICACHE_ENDPOINT_PLACEHOLDER"
